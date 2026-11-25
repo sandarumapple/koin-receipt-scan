@@ -1,0 +1,52 @@
+{
+  "expo": {
+    "name": "Koin",
+    "slug": "koin-receipts",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "splash": {
+      "resizeMode": "contain",
+      "backgroundColor": "#F4F1EA"
+    },
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.sandarum.koinreceipts",
+      "infoPlist": {
+        "NSCameraUsageDescription": "Koin uses the camera to scan your receipt.",
+        "NSPhotoLibraryUsageDescription": "Koin uses your photo library to select a receipt."
+      }
+    },
+    "android": {
+      "package": "com.sandarum.koinreceipts",
+      "adaptiveIcon": {
+        "backgroundColor": "#F4F1EA"
+      },
+      "permissions": [
+        "android.permission.CAMERA"
+      ]
+    },
+    "plugins": [
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Allow Koin to select receipts from your photo library.",
+          "cameraPermission": "Allow Koin to take photos of receipts."
+        }
+      ],
+      "expo-font"
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "404efb97-fa8e-4d8f-9940-d1ae64070dc6"
+      }
+    },
+    "owner": "sandarum",
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
+    "updates": {
+      "url": "https://u.expo.dev/404efb97-fa8e-4d8f-9940-d1ae64070dc6"
+    }
+  }
+}
