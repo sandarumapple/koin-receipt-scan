@@ -1,0 +1,37 @@
+diff --git a/node_modules/expo-ocr-kit/android/build.gradle b/node_modules/expo-ocr-kit/android/build.gradle
+index 2923cdf..e4fddd8 100644
+--- a/node_modules/expo-ocr-kit/android/build.gradle
++++ b/node_modules/expo-ocr-kit/android/build.gradle
+@@ -1,11 +1,15 @@
+-plugins {
+-  id 'com.android.library'
+-  id 'expo-module-gradle-plugin'
+-}
++apply plugin: 'com.android.library'
+ 
+ group = 'expo.modules.ocrkit'
+ version = '0.1.0'
+ 
++def expoModulesCorePlugin = new File(project(":expo-modules-core").projectDir.absolutePath, "ExpoModulesCorePlugin.gradle")
++apply from: expoModulesCorePlugin
++applyKotlinExpoModulesCorePlugin()
++useCoreDependencies()
++useDefaultAndroidSdkVersions()
++useExpoPublishing()
++
+ android {
+   namespace "expo.modules.ocrkit"
+   defaultConfig {
+diff --git a/node_modules/expo-ocr-kit/android/src/main/java/expo/modules/ocrkit/ExpoOcrKitModule.kt b/node_modules/expo-ocr-kit/android/src/main/java/expo/modules/ocrkit/ExpoOcrKitModule.kt
+index 1111111..2222222 100644
+--- a/node_modules/expo-ocr-kit/android/src/main/java/expo/modules/ocrkit/ExpoOcrKitModule.kt
++++ b/node_modules/expo-ocr-kit/android/src/main/java/expo/modules/ocrkit/ExpoOcrKitModule.kt
+@@ -60,7 +60,7 @@ class ExpoOcrKitModule : Module() {
+   private fun mapRecognitionResult(result: Text, scaleFactor: Int): Map<String, Any> {
+     return mapOf(
+       "text" to result.text,
+-      "blocks" to result.textBlocks.map { block ->
++      "blocks" to result.textBlocks.flatMap { it.lines }.map { block ->
+         mapOf(
+           "text" to block.text,
+           "boundingBox" to rectToMap(block.boundingBox, scaleFactor)

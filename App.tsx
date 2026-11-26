@@ -1,7 +1,12 @@
 import { StatusBar } from 'expo-status-bar';
-import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
+import { Feather } from '@expo/vector-icons';
+import Svg, { Path } from 'react-native-svg';
 import * as ImagePicker from 'expo-image-picker';
-import { useMemo, useState } from 'react';
+import { requireOptionalNativeModule } from 'expo';
+import { recognizeText } from 'expo-ocr-kit';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { parseReceipt, receiptTextFromBlocks } from './receiptParser';
+import { useEffect, useMemo, useState } from 'react';
 import {
   Alert,
   Image,
@@ -17,7 +22,7 @@ import {
   View,
 } from 'react-native';
 
-type Item = { id: string; name: string; cents: number };
+type Item = { id: string; name: string; cents: number; priceText?: string };
 type Expense = {
   id: string;
   merchant: string;
@@ -41,21 +46,22 @@ const palette = {
   violet: '#EAE4FF',
 };
 
-const categories = ['Food & Dining', 'Groceries', 'Transport', 'Shopping', 'Bills & Utilities'];
+const categories = ['Food & Dining', 'Groceries', 'Transport', 'Shopping', 'Bills & Utilities', 'Other'];
 
 const initialExpenses: Expense[] = [
-  { id: 'cafe', merchant: 'Cafe Kumbuk', date: 'Today, 10:42 AM', category: 'Food & Dining', items: [{ id: '1', name: 'Brunch', cents: 1850 }, { id: '2', name: 'Iced latte', cents: 650 }, { id: '3', name: 'Service charge', cents: 300 }] },
+  { id: 'cafe', merchant: 'Cafe Kumbuk', date: 'Today, 10:42 AM', category: 'Food & Dining', items: [{ id: '1', name: 'Brunch', cents: 1850 }, { id: '2', name: 'Iced latte', cents: 650 }, { id: '3', name: 'Service charge', cents: 350 }] },
   { id: 'keells', merchant: 'Keells Super', date: 'Yesterday, 6:28 PM', category: 'Groceries', items: [{ id: '1', name: 'Groceries', cents: 6420 }] },
-  { id: 'uber', merchant: 'Uber', date: 'Mon, 8:14 AM', category: 'Transport', items: [{ id: '1', name: 'Ride', cents: 1280 }] },
-  { id: 'market', merchant: 'The Good Market', date: 'Sun, 11:05 AM', category: 'Shopping', items: [{ id: '1', name: 'Market finds', cents: 3500 }] },
+  { id: 'uber', merchant: 'Uber', date: 'Nov 22, 2026', category: 'Transport', items: [{ id: '1', name: 'Ride', cents: 1280 }] },
+  { id: 'market', merchant: 'The Good Market', date: 'Nov 21, 2026', category: 'Shopping', items: [{ id: '1', name: 'Market finds', cents: 3500 }] },
 ];
 
 const totalCents = (items: Item[]) => items.reduce((sum, item) => sum + item.cents, 0);
 const money = (cents: number) => `$${(cents / 100).toFixed(2)}`;
 const currencyInput = (cents: number) => (cents / 100).toFixed(2);
-const parseMoney = (value: string) => {
-  const parsed = Number(value.replace(/[^0-9.]/g, ''));
-  return Number.isFinite(parsed) ? Math.round(parsed * 100) : 0;
+const parseMoney = (value: string): number | null => {
+  if (!/^\d{1,7}(?:\.\d{0,2})?$/.test(value)) return null;
+  const [whole, fraction = ''] = value.split('.');
+  return Number(whole) * 100 + Number(fraction.padEnd(2, '0'));
 };
 const categoryStyle = (category: string) => {
   if (category === 'Groceries') return { icon: 'basket-outline' as const, color: '#ECE5F5', ink: '#8761A6' };
@@ -67,13 +73,13 @@ const categoryStyle = (category: string) => {
 function ExpenseRow({ expense }: { expense: Expense }) {
   const badge = categoryStyle(expense.category);
   return (
-    <View style={styles.expenseRow}>
-      <View style={[styles.categoryBadge, homeStyles.badge, { backgroundColor: badge.color }]}><MaterialCommunityIcons name={badge.icon} size={21} color={badge.ink} /></View>
+    <View style={[styles.expenseRow, homeStyles.row]}>
+      <View style={[styles.categoryBadge, homeStyles.badge, { backgroundColor: badge.color }]}><ReferenceIcon name={expense.category === 'Groceries' ? 'basket' : expense.category === 'Transport' ? 'car' : expense.category === 'Shopping' ? 'bag' : 'coffee'} color={badge.ink} size={20} /></View>
       <View style={styles.rowCopy}>
-        <Text style={styles.merchant}>{expense.merchant}</Text>
-        <Text style={styles.timestamp}>{expense.date}</Text>
+        <Text style={[styles.merchant, homeStyles.merchant]}>{expense.merchant}</Text>
+        <Text style={[styles.timestamp, homeStyles.timestamp]}>{expense.date}</Text>
       </View>
-      <Text style={styles.amount}>{money(totalCents(expense.items))}</Text>
+      <Text style={[styles.amount, homeStyles.amount]}>{money(totalCents(expense.items))}</Text>
     </View>
   );
 }
@@ -83,56 +89,84 @@ export default function App() {
   const [expenses, setExpenses] = useState(initialExpenses);
   const [draft, setDraft] = useState<Expense | null>(null);
   const [scanning, setScanning] = useState(false);
+  const [scanImage, setScanImage] = useState<string | null>(null);
   const [categoryMenu, setCategoryMenu] = useState(false);
 
+  useEffect(() => {
+    AsyncStorage.getItem('koin.savedExpenses').then(value => {
+      if (value) {
+        const saved = JSON.parse(value);
+        if (Array.isArray(saved)) setExpenses([...saved, ...initialExpenses]);
+      }
+    }).catch(() => Alert.alert('Could not load saved expenses', 'Your previous expenses could not be loaded.'));
+  }, []);
+
   const beginScan = async (source: 'camera' | 'gallery') => {
-    const permission = source === 'camera'
+    try {
+      const permission = source === 'camera'
       ? await ImagePicker.requestCameraPermissionsAsync()
       : await ImagePicker.requestMediaLibraryPermissionsAsync();
-    if (!permission.granted) {
-      Alert.alert('Permission needed', `Please allow access to your ${source === 'camera' ? 'camera' : 'photo library'} to scan a bill.`);
-      return;
-    }
-    const result = source === 'camera'
+      if (!permission.granted) {
+        Alert.alert('Permission needed', `Please allow access to your ${source === 'camera' ? 'camera' : 'photo library'} to scan a bill.`);
+        return;
+      }
+      const result = source === 'camera'
       ? await ImagePicker.launchCameraAsync({ mediaTypes: ['images'], quality: 0.8 })
       : await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images'], quality: 0.8 });
-    if (result.canceled) return;
-    setScanning(true);
-    const imageUri = result.assets[0]?.uri;
-    // This deterministic fallback makes the challenge immediately testable without an API key.
-    setTimeout(() => {
-      setDraft({
-        id: `scan-${Date.now()}`,
-        merchant: 'Cafe Kumbuk',
-        date: 'Nov 24, 2026',
-        category: 'Food & Dining',
-        imageUri,
-        items: [
-          { id: 'toast', name: 'Avocado toast', cents: 1400 },
-          { id: 'coffee', name: 'Cappuccino', cents: 650 },
-          { id: 'pancakes', name: 'Banana pancakes', cents: 800 },
-        ],
-      });
-      setScanning(false);
+      if (result.canceled) return;
+      const imageUri = result.assets?.[0]?.uri;
+      if (!imageUri) {
+        Alert.alert('No image selected', 'Please choose a receipt image and try again.');
+        return;
+      }
+      if (!requireOptionalNativeModule('ExpoOcrKit')) {
+        Alert.alert('App update needed', 'Receipt scanning requires the new Koin app build. Expo Go cannot run the on-device scanner.');
+        return;
+      }
+      setScanImage(imageUri);
+      setScanning(true);
+      const recognized = await recognizeText(imageUri);
+      if (!recognized.text.trim()) throw new Error('No readable text found');
+      const parsed = parseReceipt(receiptTextFromBlocks(recognized.blocks, recognized.text));
+      setDraft({ id: `scan-${Date.now()}`, imageUri, ...parsed });
       setScreen('review');
-    }, 1100);
+      if (!parsed.merchant || !parsed.date || !parsed.items.length) {
+        Alert.alert('Check receipt details', 'Some details could not be read. Please fill them in before saving.');
+      } else if (parsed.recognizedTotal !== null && totalCents(parsed.items) !== parsed.recognizedTotal) {
+        Alert.alert('Check receipt total', 'The item sum differs from the printed total. Check taxes, fees and items before saving.');
+      }
+    } catch (error) {
+      console.warn('Receipt selection or scanning failed', error);
+      Alert.alert('Could not open or read receipt', 'Please try again with a clear photo, and check that the app can access your photos.');
+    } finally {
+      setScanning(false);
+      setScanImage(null);
+    }
   };
 
   const updateDraft = (patch: Partial<Expense>) => setDraft(current => current ? { ...current, ...patch } : current);
   const updateItem = (id: string, patch: Partial<Item>) => updateDraft({ items: (draft?.items ?? []).map(item => item.id === id ? { ...item, ...patch } : item) });
-  const addItem = () => updateDraft({ items: [...(draft?.items ?? []), { id: `item-${Date.now()}`, name: '', cents: 0 }] });
+  const addItem = () => updateDraft({ items: [...(draft?.items ?? []), { id: `item-${Date.now()}`, name: '', cents: 0, priceText: '' }] });
   const removeItem = (id: string) => updateDraft({ items: (draft?.items ?? []).filter(item => item.id !== id) });
   const draftTotal = useMemo(() => totalCents(draft?.items ?? []), [draft?.items]);
 
-  const saveExpense = () => {
+  const saveExpense = async () => {
     if (!draft) return;
     if (!draft.merchant.trim()) return Alert.alert('Add a merchant name', 'Enter the business or merchant before saving.');
-    if (!draft.items.length || draft.items.some(item => !item.name.trim() || item.cents < 0) || draftTotal <= 0) {
+    if (!draft.date.trim()) return Alert.alert('Add a date', 'Enter the receipt date before saving.');
+    if (!draft.items.length || draft.items.some(item => !item.name.trim() || item.cents <= 0 || (item.priceText !== undefined && parseMoney(item.priceText) === null)) || draftTotal <= 0) {
       return Alert.alert('Check the items', 'Add a name and a positive price for every item before saving.');
     }
-    setExpenses(current => [{ ...draft, merchant: draft.merchant.trim(), date: 'Just now' }, ...current]);
-    setScreen('expenses');
-    setDraft(null);
+    const expense = { ...draft, merchant: draft.merchant.trim() };
+    const saved = [expense, ...expenses.filter(item => !initialExpenses.some(initial => initial.id === item.id))];
+    try {
+      await AsyncStorage.setItem('koin.savedExpenses', JSON.stringify(saved));
+      setExpenses([expense, ...expenses]);
+      setScreen('expenses');
+      setDraft(null);
+    } catch {
+      Alert.alert('Could not save expense', 'Please try again.');
+    }
   };
 
   if (screen === 'review' && draft) {
@@ -163,7 +197,7 @@ export default function App() {
                   {index > 0 && <View style={reviewStyles.divider} />}
                   <View style={reviewStyles.itemRow}>
                     <TextInput value={item.name} onChangeText={(name) => updateItem(item.id, { name })} placeholder="Item name" placeholderTextColor="#94A3B8" style={reviewStyles.itemName} />
-                    <View style={reviewStyles.priceBox}><Text style={reviewStyles.currency}>$</Text><TextInput value={currencyInput(item.cents)} onChangeText={(value) => updateItem(item.id, { cents: parseMoney(value) })} keyboardType="decimal-pad" selectTextOnFocus style={reviewStyles.priceInput} /></View>
+                    <View style={reviewStyles.priceBox}><Text style={reviewStyles.currency}>$</Text><TextInput value={item.priceText ?? currencyInput(item.cents)} onChangeText={(value) => updateItem(item.id, { priceText: value, cents: parseMoney(value) ?? 0 })} keyboardType="decimal-pad" selectTextOnFocus style={reviewStyles.priceInput} /></View>
                     <Pressable accessibilityLabel={`Remove ${item.name || 'item'}`} onPress={() => removeItem(item.id)} style={styles.deleteButton}><Feather name="trash-2" size={16} color="#657574" /></Pressable>
                   </View>
                 </View>
@@ -186,16 +220,17 @@ export default function App() {
 
   return (
     <SafeAreaView style={styles.safe}>
+      <View pointerEvents="none" style={homeStyles.bottomSafe} />
       <StatusBar style="dark" />
       <ScrollView contentContainerStyle={[styles.homeContent, homeStyles.content]} showsVerticalScrollIndicator={false}>
         <View style={[styles.header, homeStyles.header]}><View><Text style={styles.eyebrow}>KOIN</Text><Text style={[styles.homeTitle, homeStyles.title]}>Expenses</Text></View><Pressable onPress={() => beginScan('gallery')} style={[styles.scanPill, homeStyles.scan]}><Feather name="plus" size={18} color={palette.ink}/><Text style={homeStyles.scanText}>Scan Bill</Text></Pressable></View>
         <View style={[styles.uploadCard, homeStyles.upload]}>
-          <View style={[styles.receiptIcon, homeStyles.receipt]}><MaterialCommunityIcons name="receipt" size={23} color="#008C63" /></View>
-          <Text style={styles.uploadTitle}>{scanning ? 'Scanning your bill...' : 'Upload or Snap a Bill'}</Text>
+          {scanning && scanImage ? <Image source={{ uri: scanImage }} style={[styles.receiptIcon, homeStyles.receipt]} /> : <View style={[styles.receiptIcon, homeStyles.receipt]}><ReferenceIcon name="receipt" color="#008C63" size={21} /></View>}
+          <Text style={[styles.uploadTitle, homeStyles.uploadTitle]}>{scanning ? 'Scanning your bill...' : 'Upload or Snap a Bill'}</Text>
           <Text style={styles.uploadSubtitle}>{scanning ? 'Finding the important details' : 'Less typing. More living.'}</Text>
           {scanning ? <View style={styles.scanningTrack}><View style={styles.scanningFill} /></View> : <View style={homeStyles.actions}><Pressable onPress={() => beginScan('camera')} style={homeStyles.button}><Feather name="camera" size={16} color={palette.ink}/><Text style={homeStyles.buttonText}>Camera</Text></Pressable><Pressable onPress={() => beginScan('gallery')} style={homeStyles.button}><Feather name="image" size={16} color={palette.ink}/><Text style={homeStyles.buttonText}>Gallery</Text></Pressable></View>}
         </View>
-        <View style={styles.activityHeading}><Text style={styles.sectionTitle}>Recent Activity</Text><Text style={styles.weekLabel}>This week</Text></View>
+        <View style={styles.activityHeading}><Text style={homeStyles.sectionTitle}>Recent Activity</Text><Text style={homeStyles.week}>This week</Text></View>
         <View>{expenses.map(expense => <ExpenseRow key={expense.id} expense={expense} />)}</View>
       </ScrollView>
       <View style={styles.bottomNav}><NavItem icon="home" label="Home" /><NavItem icon="file-text" label="Expenses" active /><NavItem icon="bar-chart-2" label="Insights" /><NavItem icon="user" label="Profile" /></View>
@@ -208,21 +243,42 @@ function Field({ label, icon, value, onChangeText }: { label: string; icon: stri
 }
 
 function NavItem({ icon, label, active }: { icon: 'home' | 'file-text' | 'bar-chart-2' | 'user'; label: string; active?: boolean }) {
-  return <View style={styles.navItem}><Feather name={icon} size={21} color={active ? '#008C63' : '#657574'} /><Text style={[styles.navLabel, { marginTop: 7 }, active && styles.navActive]}>{label}</Text></View>;
+  return <View style={styles.navItem}>{active ? <ReferenceIcon name="receipt" size={20} color="#008C63" /> : <Feather name={icon} size={21} color="#657574" />}<Text style={[homeStyles.navLabel, active && homeStyles.navActive]}>{label}</Text></View>;
+}
+
+function ReferenceIcon({ name, color, size }: { name: 'receipt' | 'coffee' | 'basket' | 'car' | 'bag'; color: string; size: number }) {
+  const paths = {
+    receipt: ['M5 2.5 7.5 4 10 2.5 12.5 4 15 2.5 17.5 4 19 3v18l-2.5-1.5L14 21l-2.5-1.5L9 21l-2.5-1.5L5 21z', 'M8 8h8M8 11h8M8 14h5'],
+    coffee: ['M4 9h13v7a4 4 0 0 1-4 4H8a4 4 0 0 1-4-4z', 'M17 11h2a2.5 2.5 0 0 1 0 5h-2M8 3v3M12 3v3'],
+    basket: ['M3 10h18l-2 10H5z', 'M7 10 10 4M17 10l-3-6M9 13v4M15 13v4'],
+    car: ['M4 11 6 5h12l2 6v8h-2v-2H6v2H4z', 'M5 11h14M7 14h2M15 14h2'],
+    bag: ['M5 8h14l1 13H4z', 'M9 8V6a3 3 0 0 1 6 0v2'],
+  };
+  return <Svg width={size} height={size} viewBox="0 0 24 24" fill="none">{paths[name].map((path, i) => <Path key={i} d={path} stroke={color} strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" />)}</Svg>;
 }
 
 const homeStyles = StyleSheet.create({
   content: { paddingHorizontal: 24, paddingTop: 14 },
-  header: { marginBottom: 28 },
+  bottomSafe: { position: 'absolute', left: 0, right: 0, bottom: 0, height: 50, backgroundColor: '#fff' },
+  header: { marginBottom: 20 },
   title: { fontSize: 29, fontWeight: '700', letterSpacing: -0.6 },
   scan: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 16, paddingVertical: 12, backgroundColor: '#0DB886' },
   scanText: { color: '#00113D', fontWeight: '600', fontSize: 13 },
   upload: { height: 219, backgroundColor: '#fff', borderColor: '#90CDBA', borderWidth: 1, borderRadius: 20, paddingTop: 32, marginBottom: 30 },
   receipt: { width: 44, height: 44, marginBottom: 15 },
+  uploadTitle: { fontWeight: '700', fontSize: 18 },
   actions: { flexDirection: 'row', gap: 10, marginTop: 13 },
   button: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, backgroundColor: '#F1EEE9', borderWidth: 1, borderColor: '#DFDEDA', borderRadius: 10, height: 40, width: 106 },
-  buttonText: { fontSize: 12, color: '#00113D', fontWeight: '600' },
+  buttonText: { fontSize: 12, color: '#00113D', fontWeight: '500' },
   badge: { width: 44, height: 44, borderRadius: 14 },
+  sectionTitle: { color: '#00113D', fontSize: 18, fontWeight: '700' },
+  week: { color: '#657574', fontSize: 11 },
+  row: { height: 72, paddingVertical: 0, borderBottomColor: '#DBDAD6' },
+  merchant: { fontWeight: '500', fontSize: 14 },
+  timestamp: { color: '#657574', fontSize: 11, fontWeight: '400' },
+  amount: { fontWeight: '700', fontSize: 14 },
+  navLabel: { marginTop: 7, color: '#657574', fontSize: 10, fontWeight: '400' },
+  navActive: { color: '#008C63', fontWeight: '600' },
 });
 
 const reviewStyles = StyleSheet.create({

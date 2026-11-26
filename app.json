@@ -34,7 +34,8 @@
           "cameraPermission": "Allow Koin to take photos of receipts."
         }
       ],
-      "expo-font"
+      "expo-font",
+      ["expo-build-properties", { "ios": { "deploymentTarget": "15.5" } }]
     ],
     "extra": {
       "eas": {
